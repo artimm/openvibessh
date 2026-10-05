@@ -18,7 +18,7 @@
 # =====================================================
 set -uo pipefail
 
-VERSION="1.8"
+VERSION="1.9"
 CONF_DIR="/etc/openvibessh"
 LIST_FILE="$CONF_DIR/agents.list"
 AGENTS_CONF_DIR="$CONF_DIR/agents"
@@ -995,6 +995,25 @@ menu_container() {
     esac
   done
 }
+# =====================================================
+# Обновление скрипта из GitHub
+# =====================================================
+update_mode() {
+  need_root "$@"
+  info "Обновляю скрипт из GitHub..."
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$OVSSH_URL" -o "$SELF"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$SELF" "$OVSSH_URL"
+  else
+    error "Нужен curl или wget для обновления."; exit 1
+  fi
+  chmod 755 "$SELF"
+  ln -sf "$SELF" /usr/local/bin/ovssh 2>/dev/null
+  ver=$( "$SELF" --version 2>/dev/null | head -1 )
+  ok "Обновлено: $ver"
+}
+
 
 install_mode() {
   need_root "$@"
@@ -1020,6 +1039,7 @@ usage() {
   echo "  $0 agent-add <имя> <пароль|-> <минуты> <политика> <no|askpass|nopasswd>"
   echo "  $0 list | disable <имя> | ssh | ttl <минут> [политика]"
   echo "  $0 install             — прописать скрипт в систему (команда ovssh)"
+  echo "  $0 update                 - обновить скрипт из GitHub"
   echo "  $0 host-agent [имя] [минут] [политика] - выдать доступ агенту на сам хост"
   echo ""
   echo "Политики TTL: lock (блок всего), locksudo (только sudo), delete (полный отзыв)"
@@ -1041,6 +1061,7 @@ main() {
     disable)   shift; disable_now "$@" ;;
     ssh)       ensure_sshd ;;
     install)   install_mode ;;
+    update)    update_mode ;;
     cron)      cron_mode ;;
     -h|--help|help) usage ;;
     "")
