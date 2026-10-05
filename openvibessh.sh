@@ -1,32 +1,31 @@
 #!/usr/bin/env bash
 # =====================================================
-# OPENVIBESSH v1.2
+# OPENVIBESSH v1.5
 # Выдача SSH-доступа агентам (логин + пароль + sudo) в LXD-контейнерах
-# + планировщик TTL: агент без активности автоматически отключается
+# + планировщик TTL (автоотключение при простое)
 #
-# Режимы (определяются автоматически по наличию команды lxc):
-#   ХОСТ:      ./openvibessh.sh host [контейнер] [внешний_порт]
-#   КОНТЕЙНЕР: ./openvibessh.sh agent <имя> [минут] [lock|locksudo|delete]
-#              ./openvibessh.sh ttl <минут> [политика]   - настройки по умолчанию
-#              ./openvibessh.sh list                     - доступы + остаток времени
-#              ./openvibessh.sh ssh                      - установить/включить/перезапустить ssh
-#              ./openvibessh.sh disable <имя>            - отключить немедленно
-#              ./openvibessh.sh cron                     - внутренний (вызывается таймером)
+# Автоопределение места запуска:
+#   ХОСТ:      ./openvibessh.sh            - меню хоста (контейнеры/порты/агенты)
+#              ./openvibessh.sh open [CT] [порт]  - сразу открыть доступ
+#              ./openvibessh.sh ports             - список открытых портов
+#              ./openvibessh.sh close             - закрыть доступ
+#   КОНТЕЙНЕР: ./openvibessh.sh              - меню контейнера
+#              ./openvibessh.sh agent <имя> [минут] [политика]
+#              ./openvibessh.sh agent-add <имя> <пароль|-> <минуты> <политика> <no|askpass|nopasswd>
+#              ./openvibessh.sh list | ttl | ssh | disable | install | cron
 #
-# Политики автоотключения при простое:
-#   lock     - блокируется пароль + sudo + обрываются сессии (агент можно включить заново)
-#   locksudo - забирается только sudo, SSH-вход остается
-#   delete   - полный отзыв: пользователь удаляется, папка архивируется
+# Политики TTL: lock | locksudo | delete
 # =====================================================
 set -uo pipefail
 
-VERSION="1.4"
+VERSION="1.5"
 CONF_DIR="/etc/openvibessh"
 LIST_FILE="$CONF_DIR/agents.list"
 AGENTS_CONF_DIR="$CONF_DIR/agents"
 TTL_CONF="$CONF_DIR/ttl.conf"
 LOG_FILE="/var/log/openvibessh.log"
 SELF="/usr/local/bin/openvibessh.sh"
+OVSSH_URL="https://raw.githubusercontent.com/artimm/openvibessh/main/openvibessh.sh"
 DEFAULT_TTL="30"
 DEFAULT_POLICY="lock"
 
@@ -55,7 +54,6 @@ need_root() {
 }
 
 self_install() {
-  # Копируем скрипт в /usr/local/bin, чтобы таймер работал независимо от curl
   if [ -f "$0" ] && [ "$(readlink -f "$0" 2>/dev/null)" != "$SELF" ]; then
     install -m 755 "$0" "$SELF" 2>/dev/null && ok "Скрипт установлен: $SELF"
   fi
@@ -64,12 +62,27 @@ self_install() {
 load_ttl_defaults() { [ -f "$TTL_CONF" ] && source "$TTL_CONF" || true; }
 
 # =====================================================
+# Самоперезапуск из файла при pipe-запуске (curl ... | bash)
+# =====================================================
+if [ ! -t 0 ] && [ "${OVSSH_EXECED:-}" != "1" ]; then
+  OVSSH_TMP="$(mktemp /tmp/ovssh.XXXXXX.sh 2>/dev/null || echo /tmp/ovssh.sh)"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$OVSSH_URL" -o "$OVSSH_TMP"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$OVSSH_TMP" "$OVSSH_URL"
+  else
+    cat > "$OVSSH_TMP"
+  fi
+  chmod +x "$OVSSH_TMP" 2>/dev/null
+  export OVSSH_EXECED=1
+  exec bash "$OVSSH_TMP" "$@"
+fi
+
+# =====================================================
 # SSH: установить / включить / запустить
 # =====================================================
 ensure_sshd() {
-  need_root "$@"
   echo "=== SSH: проверка установки и запуска ==="
-
   if ! command -v sshd >/dev/null 2>&1 && [ ! -x /usr/sbin/sshd ]; then
     info "openssh-server не установлен — устанавливаю..."
     export DEBIAN_FRONTEND=noninteractive
@@ -88,7 +101,7 @@ ensure_sshd() {
   printf 'PasswordAuthentication yes\nPort 22\n' > /etc/ssh/sshd_config.d/60-openvibessh.conf
 
   if systemctl list-unit-files ssh.socket >/dev/null 2>&1 && systemctl is-enabled ssh.socket >/dev/null 2>&1; then
-    info "Обнаружен ssh.socket (socket-activation) — отключаю, чтобы работал порт из конфига..."
+    info "Обнаружен ssh.socket (socket-activation) — отключаю..."
     systemctl stop ssh.socket 2>/dev/null
     systemctl disable ssh.socket 2>/dev/null
   fi
@@ -96,17 +109,16 @@ ensure_sshd() {
   if systemctl is-enabled ssh >/dev/null 2>&1; then
     ok "Служба ssh в автозапуске."
   else
-    info "Служба ssh выключена (disabled) — включаю..."
-    systemctl enable ssh 2>/dev/null && ok "Служба ssh включена (автозапуск)."
+    info "Служба ssh выключена — включаю..."
+    systemctl enable ssh 2>/dev/null && ok "Служба ssh включена."
   fi
 
   local st
   st=$(systemctl is-active ssh 2>/dev/null)
   if [ "$st" = "active" ]; then
-    info "Служба ssh запущена — перезапускаю для применения конфига..."
-    systemctl restart ssh && ok "ssh перезапущен."
+    systemctl restart ssh && ok "ssh перезапущен (конфиг применен)."
   else
-    info "Служба ssh не запущена (состояние: ${st:-unknown}) — запускаю..."
+    info "Служба ssh не запущена (${st:-unknown}) — запускаю..."
     systemctl start ssh && ok "ssh запущен."
   fi
 
@@ -119,7 +131,7 @@ ensure_sshd() {
 }
 
 # =====================================================
-# TTL: планировщик автоотключения
+# TTL: планировщик
 # =====================================================
 install_timer() {
   need_root "$@"
@@ -153,7 +165,6 @@ EOF
 }
 
 get_last_activity_epoch() {
-  # $1 - имя агента, $2 - epoch создания; возвращает epoch последней активности
   local ll e=""
   ll=$(lastlog -u "$1" 2>/dev/null | tail -n +2 | sed 's/.*Latest login: //' | xargs)
   if [ -n "$ll" ] && [[ "$ll" != Never* ]]; then
@@ -168,7 +179,6 @@ get_last_activity_epoch() {
 }
 
 apply_policy() {
-  # $1 - имя, $2 - политика, $3 - sudo-режим агента
   local n="$1" pol="$2" sudo_mode="$3"
   case "$pol" in
     lock)
@@ -199,7 +209,7 @@ cron_mode() {
   [ -f "$LIST_FILE" ] || exit 0
   local now
   now=$(date +%s)
-  local row name sudo_mode ttl pol state created last idle
+  local name sudo_mode ttl pol state created last idle out
   while IFS='|' read -r name f2 f3 f4 f5 f6; do
     [ -n "$name" ] || continue
     sudo_mode=$(echo "$f2" | sed 's/sudo=//')
@@ -215,7 +225,6 @@ cron_mode() {
     idle=$(( (now - last) / 60 ))
     if [ "$idle" -ge "$ttl" ]; then
       apply_policy "$name" "$pol" "$sudo_mode"
-      # помечаем DISABLED в списке
       out=""
       while IFS= read -r line; do
         if [[ "$line" == "$name|"* ]]; then
@@ -248,84 +257,62 @@ ttl_mode() {
 }
 
 # =====================================================
-# УСТАНОВКА СКРИПТА В СИСТЕМУ
+# КОНТЕЙНЕР: создание агента (неинтерактивно — для вызова с хоста)
 # =====================================================
-install_mode() {
+agent_add_batch() {
   need_root "$@"
+  local NAME="${1:-}" PASS="${2:-}" TTL="${3:-}" POLICY="${4:-}" SUDO_MODE="${5:-no}"
+  load_ttl_defaults
+  TTL="${TTL:-$DEFAULT_TTL}"
+  POLICY="${POLICY:-$DEFAULT_POLICY}"
+  validate_name "$NAME" || { error "Недопустимое имя: $NAME"; exit 1; }
+  [ "$PASS" = "-" ] && PASS=$(gen_password)
+  [[ "$TTL" =~ ^[0-9]+$ ]] && [ "$TTL" -ge 1 ] || TTL="$DEFAULT_TTL"
+  case "$POLICY" in lock|locksudo|delete) ;; *) POLICY="$DEFAULT_POLICY" ;; esac
+  case "$SUDO_MODE" in no|askpass|nopasswd) ;; *) SUDO_MODE="no" ;; esac
+
+  if id -u "$NAME" >/dev/null 2>&1; then
+    passwd -u "$NAME" >/dev/null 2>&1
+    chage -E -1 "$NAME" >/dev/null 2>&1
+  else
+    useradd -m -s /bin/bash "$NAME" || { error "useradd failed"; exit 1; }
+  fi
+  echo "$NAME:$PASS" | chpasswd
+
+  if [ "$SUDO_MODE" = "nopasswd" ]; then
+    mkdir -p /etc/sudoers.d
+    echo "$NAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/91-ovssh-"$NAME"
+    chmod 440 /etc/sudoers.d/91-ovssh-"$NAME"
+    usermod -aG sudo "$NAME" 2>/dev/null
+  elif [ "$SUDO_MODE" = "askpass" ]; then
+    usermod -aG sudo "$NAME" 2>/dev/null
+  else
+    rm -f /etc/sudoers.d/91-ovssh-"$NAME" 2>/dev/null
+  fi
+
+  ensure_sshd
+
+  mkdir -p "$CONF_DIR" "$AGENTS_CONF_DIR"
+  [ -f "$AGENTS_CONF_DIR/$NAME.conf" ] || echo "CREATED_EPOCH=$(date +%s)" > "$AGENTS_CONF_DIR/$NAME.conf"
+  touch "$LIST_FILE"
+  grep -v "^$NAME|" "$LIST_FILE" > "$LIST_FILE.tmp" 2>/dev/null || true
+  mv "$LIST_FILE.tmp" "$LIST_FILE" 2>/dev/null
+  echo "$NAME|sudo=$SUDO_MODE|$(date +%Y-%m-%d)|ttl=$TTL|policy=$POLICY|state=ACTIVE" >> "$LIST_FILE"
+
   self_install
-  ln -sf "$SELF" /usr/local/bin/ovssh
-  ok "============================================="
-  ok "openvibessh установлен в систему!"
-  echo "  Команды:  ovssh          (меню/автоопределение)"
-  echo "            ovssh host     (на LXD-хосте)"
-  echo "            ovssh agent <имя> [минут] [политика]"
-  echo "            ovssh list | ssh | disable <имя> | ttl <минут>"
-  ok "============================================="
+  if [ ! -f /etc/systemd/system/openvibessh-cron.timer ]; then
+    install_timer
+  fi
+
+  echo "OVSSH_AGENT_OK=$NAME"
+  echo "OVSSH_AGENT_PASS=$PASS"
+  echo "OVSSH_AGENT_TTL=$TTL"
+  echo "OVSSH_AGENT_POLICY=$POLICY"
+  echo "OVSSH_AGENT_SUDO=$SUDO_MODE"
 }
 
 # =====================================================
-# РЕЖИМ ХОСТА
-# =====================================================
-host_mode() {
-  command -v lxc >/dev/null 2>&1 || { error "Команда lxc не найдена — режим 'host' работает на LXD-хосте."; exit 1; }
-
-  local CT="${1:-}"
-  local PORT="${2:-}"
-
-  mapfile -t CTRS < <(lxc list --format csv -c ns 2>/dev/null | awk -F, '$2=="RUNNING"{print $1}')
-  if [ "${#CTRS[@]}" -eq 0 ]; then
-    error "Нет запущенных LXD-контейнеров (lxc list пуст)."
-    exit 1
-  fi
-
-  if [ -z "$CT" ]; then
-    echo "Активные контейнеры:"
-    local i=1
-    for c in "${CTRS[@]}"; do echo "  $i) $c"; i=$((i+1)); done
-    read -rp "Номер контейнера [1-$((i-1))]: " n
-    if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt $((i-1)) ]; then
-      error "Неверный выбор."; exit 1
-    fi
-    CT="${CTRS[$((n-1))]}"
-  fi
-
-  if [ -z "$PORT" ]; then
-    read -rp "Внешний SSH-порт на хосте [2424]: " PORT
-  fi
-  PORT="${PORT:-2424}"
-  if ! is_port_free "$PORT"; then
-    error "Порт $PORT на хосте уже занят. Укажите другой."
-    exit 1
-  fi
-
-  info "Контейнер: $CT | внешний порт: $PORT -> внутренний 22"
-
-  info "Готовим SSH внутри контейнера (openssh-server + парольный вход)..."
-  if lxc exec "$CT" -- bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq 2>/dev/null; apt-get install -y -qq openssh-server 2>/dev/null; mkdir -p /etc/ssh/sshd_config.d; printf 'PasswordAuthentication yes\nPort 22\n' > /etc/ssh/sshd_config.d/60-openvibessh.conf; if systemctl is-active ssh.socket >/dev/null 2>&1; then systemctl stop ssh.socket; systemctl disable ssh.socket 2>/dev/null; fi; systemctl enable ssh >/dev/null 2>&1; systemctl restart ssh"; then
-    ok "SSH в контейнере готов (порт 22, вход по паролю разрешен)."
-  else
-    warn "Не удалось автоматически подготовить SSH — проверьте контейнер вручную."
-  fi
-
-  lxc config device remove "$CT" "ovssh-$PORT" >/dev/null 2>&1 || true
-  if lxc config device add "$CT" "ovssh-$PORT" proxy listen=tcp:0.0.0.0:$PORT connect=tcp:127.0.0.1:22; then
-    ok "Проброс добавлен: хост:$PORT -> контейнер:22"
-  else
-    error "Не удалось добавить proxy-устройство LXD."
-    exit 1
-  fi
-
-  local HIP
-  HIP=$(hostname -I 2>/dev/null | awk '{print $1}')
-  echo ""
-  ok "Порт открыт. Следующий шаг — создать агента ВНУТРИ контейнера:"
-  echo "  lxc exec $CT -- bash -c \"curl -fsSL https://raw.githubusercontent.com/artimm/openvibessh/main/openvibessh.sh | bash -s -- agent <имя> [минут] [политика]\""
-  echo ""
-  ok "Подключение агента:  ssh <имя>@${HIP:-<IP_ХОСТА>} -p $PORT"
-}
-
-# =====================================================
-# РЕЖИМ КОНТЕЙНЕРА: выдача доступа агенту (с TTL)
+# КОНТЕЙНЕР: интерактивная выдача доступа
 # =====================================================
 agent_mode() {
   need_root "$@"
@@ -342,7 +329,7 @@ agent_mode() {
   POLICY="${POLICY:-$DEFAULT_POLICY}"
 
   validate_name "$NAME" || { error "Недопустимое имя: строчные a-z, цифры, '-', '_'."; exit 1; }
-  [[ "$TTL" =~ ^[0-9]+$ ]] && [ "$TTL" -ge 1 ] || { error "TTL должен быть числом минут: $0 agent <имя> 30 lock"; exit 1; }
+  [[ "$TTL" =~ ^[0-9]+$ ]] && [ "$TTL" -ge 1 ] || { error "TTL должен быть числом минут."; exit 1; }
   case "$POLICY" in lock|locksudo|delete) ;; *) error "Политика: lock | locksudo | delete"; exit 1 ;; esac
 
   local SUDO_MODE="no"
@@ -356,46 +343,7 @@ agent_mode() {
   read -rp "Пароль (Enter — сгенерировать случайный): " p
   if [ -n "${p:-}" ]; then PASS="$p"; else PASS=$(gen_password); fi
 
-  if id -u "$NAME" >/dev/null 2>&1; then
-    info "Пользователь '$NAME' уже существует — переоткрываю доступ (пароль и TTL обновлены)."
-    passwd -u "$NAME" >/dev/null 2>&1
-    chage -E -1 "$NAME" >/dev/null 2>&1
-    if [ -f /etc/sudoers.d/91-ovssh-"$NAME".disabled ] && [ "$SUDO_MODE" = "nopasswd" ]; then
-      mv /etc/sudoers.d/91-ovssh-"$NAME".disabled /etc/sudoers.d/91-ovssh-"$NAME"
-    fi
-  else
-    useradd -m -s /bin/bash "$NAME" || { error "Не удалось создать пользователя."; exit 1; }
-  fi
-  echo "$NAME:$PASS" | chpasswd
-
-  if [ "$SUDO_MODE" = "nopasswd" ]; then
-    mkdir -p /etc/sudoers.d
-    echo "$NAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/91-ovssh-"$NAME"
-    chmod 440 /etc/sudoers.d/91-ovssh-"$NAME"
-    usermod -aG sudo "$NAME" 2>/dev/null
-  elif [ "$SUDO_MODE" = "askpass" ]; then
-    usermod -aG sudo "$NAME" 2>/dev/null
-  else
-    rm -f /etc/sudoers.d/91-ovssh-"$NAME" 2>/dev/null
-    usermod -R sudo "$NAME" 2>/dev/null
-  fi
-
-  ensure_sshd
-
-  # TTL-учет
-  mkdir -p "$CONF_DIR" "$AGENTS_CONF_DIR"
-  if [ ! -f "$AGENTS_CONF_DIR/$NAME.conf" ]; then
-    echo "CREATED_EPOCH=$(date +%s)" > "$AGENTS_CONF_DIR/$NAME.conf"
-  fi
-  touch "$LIST_FILE"
-  grep -v "^$NAME|" "$LIST_FILE" > "$LIST_FILE.tmp" 2>/dev/null || true
-  mv "$LIST_FILE.tmp" "$LIST_FILE" 2>/dev/null
-  echo "$NAME|sudo=$SUDO_MODE|$(date +%Y-%m-%d)|ttl=$TTL|policy=$POLICY|state=ACTIVE" >> "$LIST_FILE"
-
-  self_install
-  if [ ! -f /etc/systemd/system/openvibessh-cron.timer ]; then
-    install_timer
-  fi
+  agent_add_batch "$NAME" "$PASS" "$TTL" "$POLICY" "$SUDO_MODE"
 
   local CIP
   CIP=$(hostname -I 2>/dev/null | awk '{print $1}')
@@ -405,14 +353,13 @@ agent_mode() {
   echo "  Логин:    $NAME"
   echo "  Пароль:   $PASS"
   echo "  Sudo:     $SUDO_MODE"
-  echo "  TTL:      автоотключение через $TTL мин простоя (политика: $POLICY)"
+  echo "  TTL:      $TTL мин простоя (политика: $POLICY)"
   echo "  Внутри:   ssh $NAME@${CIP:-<IP_контейнера>} (порт 22)"
-  echo "  Снаружи:  ssh $NAME@<IP_хоста> -p <внешний порт>"
   ok "============================================="
 }
 
 # =====================================================
-# РЕЖИМ КОНТЕЙНЕРА: список выданных прав + остаток времени
+# КОНТЕЙНЕР: список + отключение
 # =====================================================
 list_mode() {
   need_root "$@"
@@ -453,7 +400,7 @@ disable_now() {
   need_root "$@"
   local NAME="${1:-}"
   [ -z "$NAME" ] && { error "Укажите имя: $0 disable <имя>"; exit 1; }
-  local sudo_mode="no"
+  local sudo_mode
   sudo_mode=$(grep "^$NAME|" "$LIST_FILE" 2>/dev/null | head -1 | grep -oE 'sudo=[a-z]+' | sed 's/sudo=//')
   [ -n "$sudo_mode" ] || sudo_mode="no"
   apply_policy "$NAME" "lock" "$sudo_mode"
@@ -463,77 +410,254 @@ disable_now() {
 }
 
 # =====================================================
+# ХОСТ: выбор контейнера
+# =====================================================
+pick_container() {
+  local CT="$1"
+  mapfile -t CTRS < <(lxc list --format csv -c ns 2>/dev/null | awk -F, '$2=="RUNNING"{print $1}')
+  if [ "${#CTRS[@]}" -eq 0 ]; then
+    error "Нет запущенных LXD-контейнеров."
+    return 1
+  fi
+  if [ -z "$CT" ]; then
+    echo "Активные контейнеры:"
+    local i=1
+    for c in "${CTRS[@]}"; do echo "  $i) $c"; i=$((i+1)); done
+    read -rp "Номер контейнера [1-$((i-1))]: " n
+    if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt $((i-1)) ]; then
+      error "Неверный выбор."; return 1
+    fi
+    CT="${CTRS[$((n-1))]}"
+  else
+    local found=false
+    for c in "${CTRS[@]}"; do [ "$c" = "$CT" ] && found=true; done
+    $found || { error "Контейнер '$CT' не найден среди запущенных."; return 1; }
+  fi
+  echo "$CT"
+}
+
+# =====================================================
+# ХОСТ: открыть доступ (+ создать агента удаленно)
+# =====================================================
+open_access() {
+  local CT="${1:-}" PORT="${2:-}"
+  CT=$(pick_container "$CT") || return 1
+
+  if [ -z "$PORT" ]; then
+    read -rp "Внешний SSH-порт на хосте [2424]: " PORT
+  fi
+  PORT="${PORT:-2424}"
+  if ! is_port_free "$PORT"; then
+    error "Порт $PORT на хосте уже занят."
+    return 1
+  fi
+
+  info "Контейнер: $CT | внешний порт: $PORT -> внутренний 22"
+
+  info "Готовим SSH внутри контейнера..."
+  if lxc exec "$CT" -- bash -c "command -v sshd >/dev/null 2>&1 || { export DEBIAN_FRONTEND=noninteractive; apt-get update -qq 2>/dev/null; apt-get install -y -qq openssh-server 2>/dev/null; }; mkdir -p /etc/ssh/sshd_config.d; printf 'PasswordAuthentication yes\nPort 22\n' > /etc/ssh/sshd_config.d/60-openvibessh.conf; if systemctl list-unit-files ssh.socket >/dev/null 2>&1 && systemctl is-enabled ssh.socket >/dev/null 2>&1; then systemctl stop ssh.socket; systemctl disable ssh.socket 2>/dev/null; fi; systemctl enable ssh >/dev/null 2>&1; systemctl restart ssh"; then
+    ok "SSH в контейнере готов (порт 22, пароли разрешены)."
+  else
+    warn "Не удалось подготовить SSH автоматически."
+  fi
+
+  lxc config device remove "$CT" "ovssh-$PORT" >/dev/null 2>&1 || true
+  if lxc config device add "$CT" "ovssh-$PORT" proxy listen=tcp:0.0.0.0:$PORT connect=tcp:127.0.0.1:22; then
+    ok "Проброс добавлен: хост:$PORT -> контейнер:22"
+  else
+    error "Не удалось добавить proxy-устройство LXD."
+    return 1
+  fi
+
+  read -rp "Создать агента внутри контейнера сейчас? (Y/n): " ca
+  if [[ ! "${ca:-}" =~ ^[Nn]$ ]]; then
+    local NAME PASS TTL POLICY SUDO_MODE
+    read -rp "Имя агента (логин): " NAME
+    if ! validate_name "$NAME"; then error "Недопустимое имя."; return 1; fi
+    read -rp "Пароль (Enter — сгенерировать случайный): " p
+    if [ -n "${p:-}" ]; then PASS="$p"; else PASS=$(gen_password); fi
+    read -rp "Минут простоя до автоотключения [30]: " TTL
+    TTL="${TTL:-30}"
+    read -rp "Политика (lock / locksudo / delete) [lock]: " POLICY
+    POLICY="${POLICY:-lock}"
+    read -rp "Sudo: nopasswd / askpass / no [nopasswd]: " SUDO_MODE
+    SUDO_MODE="${SUDO_MODE:-nopasswd}"
+
+    info "Создаю агента '$NAME' внутри контейнера..."
+    if lxc exec "$CT" -- bash -c "command -v curl >/dev/null 2>&1 || { export DEBIAN_FRONTEND=noninteractive; apt-get update -qq 2>/dev/null; apt-get install -y -qq curl 2>/dev/null; }; curl -fsSL $OVSSH_URL -o /tmp/ovssh-agent.sh 2>/dev/null && bash /tmp/ovssh-agent.sh agent-add '$NAME' '$PASS' '$TTL' '$POLICY' '$SUDO_MODE'"; then
+      local HIP
+      HIP=$(hostname -I 2>/dev/null | awk '{print $1}')
+      echo ""
+      ok "============================================="
+      ok "Полностью готово!"
+      echo "  Подключение:  ssh $NAME@${HIP:-<IP_ХОСТА>} -p $PORT"
+      echo "  Пароль:       указан выше при создании"
+      echo "  TTL:          $TTL мин простоя (политика: $POLICY)"
+      ok "============================================="
+      return 0
+    else
+      error "Не удалось создать агента удаленно. Вручную:"
+      echo "  lxc exec $CT -- bash -c \"curl -fsSL $OVSSH_URL | bash -s -- agent <имя>\""
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# =====================================================
+# ХОСТ: список и закрытие портов
+# =====================================================
+list_host_ports() {
+  echo "=== Открытые SSH-порты (openvibessh) ==="
+  local found=false
+  while IFS= read -r ct; do
+    [ -n "$ct" ] || continue
+    while IFS= read -r dev; do
+      [ -n "$dev" ] || continue
+      local listen connect
+      listen=$(lxc config device get "$ct" "$dev" listen 2>/dev/null | sed 's/tcp:0.0.0.0://')
+      connect=$(lxc config device get "$ct" "$dev" connect 2>/dev/null | sed 's/tcp:127.0.0.1://')
+      echo "  $ct: $listen -> $connect"
+      found=true
+    done < <(lxc config device list "$ct" 2>/dev/null | grep "ovssh-")
+  done < <(lxc list --format csv -c n 2>/dev/null)
+  $found || warn "Открытых портов openvibessh нет."
+}
+
+close_access() {
+  local rows
+  rows=$(lxc list --format csv -c n 2>/dev/null | while IFS= read -r ct; do
+      [ -n "$ct" ] || continue
+      while IFS= read -r dev; do
+        [ -n "$dev" ] || continue
+        local listen
+        listen=$(lxc config device get "$ct" "$dev" listen 2>/dev/null | sed 's/tcp:0.0.0.0://')
+        echo "$ct|$dev|$listen"
+      done < <(lxc config device list "$ct" 2>/dev/null | grep "ovssh-")
+  done)
+  if [ -z "$rows" ]; then
+    warn "Открытых портов openvibessh нет."
+    return
+  fi
+  echo "Открытые порты:"
+  local i=1
+  local arr_ct=() arr_dev=() arr_l=()
+  while IFS='|' read -r ct dev l; do
+    echo "  $i) $ct: $l"
+    arr_ct+=("$ct"); arr_dev+=("$dev"); arr_l+=("$l")
+    i=$((i+1))
+  done <<< "$rows"
+  read -rp "Номер для закрытия [1-$((i-1))]: " n
+  if [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le $((i-1)) ]; then
+    lxc config device remove "${arr_ct[$((n-1))]}" "${arr_dev[$((n-1))]}" \
+      && ok "Доступ закрыт: ${arr_ct[$((n-1))]} порт ${arr_l[$((n-1))]}"
+  else
+    error "Неверный выбор."
+  fi
+}
+
+host_menu() {
+  while true; do
+    echo ""
+    echo "====================================================="
+    echo "   OPENVIBESSH v$VERSION — режим LXD-хоста"
+    echo "====================================================="
+    echo " 1) Открыть доступ контейнеру (порт + агент)"
+    echo " 2) Список открытых портов"
+    echo " 3) Закрыть доступ (удалить порт)"
+    echo " 0) Выход"
+    echo "====================================================="
+    read -rp "Выбор [0-3]: " c
+    case "${c:-}" in
+      1) open_access ;;
+      2) list_host_ports ;;
+      3) close_access ;;
+      0) exit 0 ;;
+      *) warn "Неизвестный пункт." ;;
+    esac
+  done
+}
+
+# =====================================================
+# КОНТЕЙНЕР: меню
+# =====================================================
 menu_container() {
-  echo "OPENVIBESSH v$VERSION — режим контейнера"
-  echo " 1) Выдать доступ агенту (логин + пароль + sudo + TTL)"
-  echo " 2) Список доступов и остаток времени"
-  echo " 3) Настроить TTL автоотключения"
-  echo " 4) Починить SSH (установить / включить / перезапустить)"
-  echo " 5) Отключить агента немедленно"
-  echo " 0) Выход"
-  read -rp "Выбор [0-5]: " c
-  case "${c:-}" in
-    1) agent_mode "" ;;
-    2) list_mode ;;
-    3) read -rp "Минут простоя до отключения [30]: " m
+  while true; do
+    echo ""
+    echo "====================================================="
+    echo "   OPENVIBESSH v$VERSION — режим контейнера"
+    echo "====================================================="
+    echo " 1) Выдать доступ агенту (логин + пароль + sudo + TTL)"
+    echo " 2) Список доступов и остаток времени"
+    echo " 3) Настроить TTL автоотключения"
+    echo " 4) Починить SSH (установить / включить / перезапустить)"
+    echo " 5) Отключить агента немедленно"
+    echo " 6) Установить скрипт в систему (команда ovssh)"
+    echo " 0) Выход"
+    echo "====================================================="
+    read -rp "Выбор [0-6]: " c
+    case "${c:-}" in
+      1) agent_mode "" ;;
+      2) list_mode ;;
+      3) read -rp "Минут простоя до отключения [30]: " m
        read -rp "Политика (lock / locksudo / delete) [lock]: " p
        ttl_mode "${m:-30}" "${p:-lock}" ;;
-    4) ensure_sshd ;;
-    5) read -rp "Имя агента: " n
+      4) ensure_sshd ;;
+      5) read -rp "Имя агента: " n
        [ -n "$n" ] && disable_now "$n" ;;
-    0) exit 0 ;;
-    *) warn "Неизвестный пункт." ;;
-  esac
+      6) install_mode ;;
+      0) exit 0 ;;
+      *) warn "Неизвестный пункт." ;;
+    esac
+  done
 }
 
+install_mode() {
+  need_root "$@"
+  self_install
+  ln -sf "$SELF" /usr/local/bin/ovssh
+  ok "============================================="
+  ok "openvibessh установлен в систему!"
+  echo "  Команды:  ovssh          (меню/автоопределение)"
+  echo "            ovssh host     (на LXD-хосте)"
+  echo "            ovssh agent <имя> [минут] [политика]"
+  echo "            ovssh list | ssh | disable <имя> | ttl <минут>"
+  ok "============================================="
+}
+
+# =====================================================
 usage() {
   echo "OPENVIBESSH v$VERSION — выдача SSH-доступа агентам в LXD (+TTL планировщик)"
-  echo "  $0 host [контейнер] [порт]        — на хосте: контейнеры + проброс порта -> 22"
-  echo "  $0 agent <имя> [минут] [политика] — в контейнере: доступ (логин+пароль+sudo)+TTL"
-  echo "  $0 ttl <минут> [политика]         — настройки автоотключения по умолчанию"
-  echo "  $0 list                           — доступы + остаток времени"
-  echo "  $0 disable <имя>                  — отключить агента немедленно"
-  echo "  $0 ssh                            — установить/включить/перезапустить ssh"
-  echo "  $0 install                    - install script to system (command: ovssh)"
-  echo "  $0 cron                           — внутренний (вызывается таймером systemd)"
+  echo "  $0                     — меню (хост или контейнер, автоопределение)"
+  echo "  $0 open [CT] [порт]    — на хосте: открыть доступ контейнеру"
+  echo "  $0 ports               — на хосте: список открытых портов"
+  echo "  $0 close               — на хосте: закрыть доступ"
+  echo "  $0 agent <имя> [минут] [политика]          — в контейнере"
+  echo "  $0 agent-add <имя> <пароль|-> <минуты> <политика> <no|askpass|nopasswd>"
+  echo "  $0 list | disable <имя> | ssh | ttl <минут> [политика]"
+  echo "  $0 install             — прописать скрипт в систему (команда ovssh)"
   echo ""
-  echo "Политики: lock (блок всего), locksudo (только sudo), delete (полный отзыв)"
+  echo "Политики TTL: lock (блок всего), locksudo (только sudo), delete (полный отзыв)"
 }
-
-# =====================================================
-# Самоперезапуск из файла, если скрипт передан через pipe (curl ... | bash):
-# stdin уже частично прочитан bash, поэтому НЕ копируем поток,
-# а скачиваем каноническую копию скрипта с GitHub (curl -> wget -> stdin)
-# =====================================================
-if [ ! -t 0 ] && [ "${OVSSH_EXECED:-}" != "1" ]; then
-  OVSSH_TMP="$(mktemp /tmp/ovssh.XXXXXX.sh 2>/dev/null || echo /tmp/ovssh.sh)"
-  OVSSH_URL="https://raw.githubusercontent.com/artimm/openvibessh/main/openvibessh.sh"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$OVSSH_URL" -o "$OVSSH_TMP"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$OVSSH_TMP" "$OVSSH_URL"
-  else
-    cat > "$OVSSH_TMP"
-  fi
-  chmod +x "$OVSSH_TMP" 2>/dev/null
-  export OVSSH_EXECED=1
-  exec bash "$OVSSH_TMP" "$@"
-fi
 
 main() {
   case "${1:-}" in
-    host)    shift; host_mode "$@" ;;
-    agent)   shift; agent_mode "$@" ;;
-    ttl)     shift; ttl_mode "$@" ;;
-    list)    list_mode ;;
-    disable) shift; disable_now "$@" ;;
-    ssh)     ensure_sshd ;;
-    install) install_mode ;;
-    cron)    cron_mode ;;
+    host)      host_menu ;;
+    open)      shift; open_access "$@" ;;
+    ports)     list_host_ports ;;
+    close)     close_access ;;
+    agent)     shift; agent_mode "$@" ;;
+    agent-add) shift; agent_add_batch "$@" ;;
+    ttl)       shift; ttl_mode "$@" ;;
+    list)      list_mode ;;
+    disable)   shift; disable_now "$@" ;;
+    ssh)       ensure_sshd ;;
+    install)   install_mode ;;
+    cron)      cron_mode ;;
     -h|--help|help) usage ;;
     "")
       if command -v lxc >/dev/null 2>&1; then
-        host_mode
+        host_menu
       else
         menu_container
       fi ;;
