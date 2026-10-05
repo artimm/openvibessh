@@ -54,8 +54,8 @@ curl -fsSL https://raw.githubusercontent.com/artimm/openvibessh/main/openvibessh
  3) Закрыть доступ (удалить порт)
  4) Войти в shell контейнера
  5) Запустить openvibessh внутри контейнера
- 7) ?????? ?????? ?????? ?? ???? ????
  6) Диагностика (контейнеры / порты / агенты)
+ 7) Выдать доступ агенту на ЭТОТ хост
  0) Выход
 ```
 
@@ -71,6 +71,7 @@ curl -fsSL https://raw.githubusercontent.com/artimm/openvibessh/main/openvibessh
  1) Контейнеры (имя, статус, IP)
  2) Порты openvibessh (слушаются ли на хосте)
  3) Агенты в контейнере (sshd, порт 22, TTL)
+ 4) ?????? ?? ???? ????? (list)
  0) Назад
 ```
 
