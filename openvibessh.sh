@@ -18,7 +18,7 @@
 # =====================================================
 set -uo pipefail
 
-VERSION="1.5.1"
+VERSION="1.5.2"
 CONF_DIR="/etc/openvibessh"
 LIST_FILE="$CONF_DIR/agents.list"
 AGENTS_CONF_DIR="$CONF_DIR/agents"
@@ -75,11 +75,19 @@ if [ ! -t 0 ] && [ "${OVSSH_EXECED:-}" != "1" ]; then
   fi
   chmod +x "$OVSSH_TMP" 2>/dev/null
   export OVSSH_EXECED=1
-  # stdin - труба от curl; переключаем на терминал, чтобы меню и вопросы работали
-  if [ -e /dev/tty ]; then
-    exec bash "$OVSSH_TMP" "$@" < /dev/tty
+  # stdin - труба от curl; переключаем ввод на терминал (если он есть)
+  if { true </dev/tty; } 2>/dev/null; then
+    exec bash "$OVSSH_TMP" "$@" </dev/tty
   fi
-  exec bash "$OVSSH_TMP" "$@"
+  # Терминала нет (запуск из агента/скрипта) - меню невозможно
+  error "Нет интерактивного терминала (TTY) - меню недоступно."
+  echo ""
+  echo "Запустите в обычном SSH-терминале для меню, либо используйте подкоманды:"
+  echo "  $0 open <контейнер> <порт>     - открыть доступ (хост)"
+  echo "  $0 ports | close               - список / закрыть (хост)"
+  echo "  $0 agent-add <имя> <пароль|-> <минуты> <политика> <no|askpass|nopasswd>"
+  echo "  $0 list | ssh | disable <имя> | ttl <минут> [политика] | install"
+  exit 1
 fi
 
 # =====================================================
