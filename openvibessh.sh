@@ -20,7 +20,7 @@
 # =====================================================
 set -uo pipefail
 
-VERSION="1.3"
+VERSION="1.3.1"
 CONF_DIR="/etc/openvibessh"
 LIST_FILE="$CONF_DIR/agents.list"
 AGENTS_CONF_DIR="$CONF_DIR/agents"
@@ -485,12 +485,20 @@ usage() {
 
 # =====================================================
 # Самоперезапуск из файла, если скрипт передан через pipe (curl ... | bash):
-# иначе интерактивные вопросы (read) ловили бы сам скрипт из stdin
+# stdin уже частично прочитан bash, поэтому НЕ копируем поток,
+# а скачиваем каноническую копию скрипта с GitHub (curl -> wget -> stdin)
 # =====================================================
 if [ ! -t 0 ] && [ "${OVSSH_EXECED:-}" != "1" ]; then
   OVSSH_TMP="$(mktemp /tmp/ovssh.XXXXXX.sh 2>/dev/null || echo /tmp/ovssh.sh)"
-  cat > "$OVSSH_TMP"
-  chmod +x "$OVSSH_TMP"
+  OVSSH_URL="https://raw.githubusercontent.com/artimm/openvibessh/main/openvibessh.sh"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$OVSSH_URL" -o "$OVSSH_TMP"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$OVSSH_TMP" "$OVSSH_URL"
+  else
+    cat > "$OVSSH_TMP"
+  fi
+  chmod +x "$OVSSH_TMP" 2>/dev/null
   export OVSSH_EXECED=1
   exec bash "$OVSSH_TMP" "$@"
 fi
