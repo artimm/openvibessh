@@ -1,4 +1,26 @@
 # openvibessh
+## Быстрый старт — универсальная команда (curl или wget, или сама поставит curl)
+
+```bash
+bash -c 'U=https://raw.githubusercontent.com/artimm/openvibessh/main/openvibessh.sh;F=/tmp/ovs.sh;if command -v curl >/dev/null;then curl -fsSL "$U" -o "$F";elif command -v wget >/dev/null;then wget -qO "$F" "$U";else apt-get update -qq;apt-get install -y -qq curl;curl -fsSL "$U" -o "$F";fi;bash "$F"'
+```
+
+Скрипт сам определит, где запущен (LXD-хост или контейнер) и откроет нужный режим.
+
+## Установка в систему (команда ovssh)
+
+Внутри скрипта: `bash openvibessh.sh install` — пропишет себя в `/usr/local/bin/openvibessh.sh` и создаст алиас `ovssh`. Дальше везде коротко:
+
+```bash
+ovssh                      # меню / автоопределение
+ovssh host                 # на LXD-хосте: контейнеры + проброс порта
+ovssh agent <имя> 30 lock  # в контейнере: выдать доступ с TTL
+ovssh list                 # выданные права + остаток времени
+ovssh ssh                  # починить ssh
+ovssh disable <имя>        # отключить агента
+```
+
+⚠️ Запускайте через `bash`, не `sh` — скрипт использует bash-функции (mapfile, [[ ]]), в dash они не работают.
 
 Мини-скрипт выдачи SSH-доступа агентам (логин + пароль + sudo) в LXD-контейнерах. Без сертификатов — только логин и пароль. **Плюс планировщик TTL**: агент, в котором нет активности, автоматически отключается через заданное время.
 
