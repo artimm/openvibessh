@@ -71,7 +71,7 @@ curl -fsSL https://raw.githubusercontent.com/artimm/openvibessh/main/openvibessh
  1) Контейнеры (имя, статус, IP)
  2) Порты openvibessh (слушаются ли на хосте)
  3) Агенты в контейнере (sshd, порт 22, TTL)
- 4) ?????? ?? ???? ????? (list)
+ 4) Агенты на этом хосте (list)
  0) Назад
 ```
 
