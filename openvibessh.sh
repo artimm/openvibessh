@@ -426,23 +426,32 @@ disable_now() {
 # =====================================================
 pick_container() {
   local CT="$1"
-  mapfile -t CTRS < <(lxc list --format csv -c ns 2>/dev/null | awk -F, '$2=="RUNNING"{print $1}')
-  if [ "${#CTRS[@]}" -eq 0 ]; then
+  mapfile -t ROWS < <(lxc list --format csv -c ns4 2>/dev/null | awk -F, '$2=="RUNNING"{print $1"|"$3}')
+  if [ "${#ROWS[@]}" -eq 0 ]; then
     error "Нет запущенных LXD-контейнеров."
     return 1
   fi
+  # Список печатаем в stderr: функция вызывается в $(...), stdout перехватывается
+  echo "Активные контейнеры:" >&2
+  local i=1 names=() row nm ip
+  for row in "${ROWS[@]}"; do
+    nm="${row%%|*}"
+    ip="${row#*|}"
+    [ "$ip" = "$row" ] && ip=""
+    printf "  %2d) %-30s %s\n" "$i" "$nm" "${ip:--}" >&2
+    names+=("$nm")
+    i=$((i+1))
+  done
   if [ -z "$CT" ]; then
-    echo "Активные контейнеры:"
-    local i=1
-    for c in "${CTRS[@]}"; do echo "  $i) $c"; i=$((i+1)); done
     read -rp "Номер контейнера [1-$((i-1))]: " n
     if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt $((i-1)) ]; then
-      error "Неверный выбор."; return 1
+      error "Неверный выбор."
+      return 1
     fi
-    CT="${CTRS[$((n-1))]}"
+    CT="${names[$((n-1))]}"
   else
     local found=false
-    for c in "${CTRS[@]}"; do [ "$c" = "$CT" ] && found=true; done
+    for nm in "${names[@]}"; do [ "$nm" = "$CT" ] && found=true; done
     $found || { error "Контейнер '$CT' не найден среди запущенных."; return 1; }
   fi
   echo "$CT"
