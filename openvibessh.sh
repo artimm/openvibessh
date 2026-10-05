@@ -18,7 +18,7 @@
 # =====================================================
 set -uo pipefail
 
-VERSION="1.7"
+VERSION="1.8"
 CONF_DIR="/etc/openvibessh"
 LIST_FILE="$CONF_DIR/agents.list"
 AGENTS_CONF_DIR="$CONF_DIR/agents"
@@ -714,6 +714,215 @@ diag_menu() {
     echo " 1) Контейнеры (имя, статус, IP)"
     echo " 2) Порты openvibessh (слушаются ли на хосте)"
     echo " 3) Агенты в контейнере (sshd, порт 22, TTL)"
+    echo " 4) Агенты на этом хосте (список: list)"
+    echo " 0) Назад"
+    echo "==================================="
+    read -rp "Выбор [0-4]: " c || exit 0
+    case "${c:-}" in
+      1) diag_containers ;;
+      2) diag_ports ;;
+      3) diag_agents ;;
+      4) list_mode ;;
+      0) break ;;
+      *) warn "Неизвестный пункт." ;;
+    esac
+  done
+}
+
+host_menu() {
+  while true; do
+    echo ""
+    echo "====================================================="
+    echo "   OPENVIBESSH v$VERSION — режим LXD-хоста"
+    echo "====================================================="
+    echo " 1) Открыть доступ контейнеру (порт + агент)"
+    echo " 2) Список открытых порports"
+    echo " 3) Закрыть доступ (удалить порт)"
+    echo " 4) Войти в shell контейнера"
+    echo " 5) Запустить openvibessh внутри контейнера"
+    echo " 6) Диагностика (контейнеры / порты / агенты)"
+    echo " 7) Выдать доступ агенту на ЭТОТ хост"
+    echo " 0) Выход"
+    echo "====================================================="
+    read -rp "Выбор [0-7]: " c || exit 0
+    case "${c:-}" in
+      1) open_access ;;
+      2) list_host_ports ;;
+      3) close_access ;;
+      4) shell_into_container ;;
+      5) run_inside_container ;;
+      6) diag_menu ;;
+      7) host_agent_mode ;;
+      0) exit 0 ;;
+      *) warn "Неизвестный пункт." ;;
+    esac
+  done
+}
+
+# =====================================================
+# ХОСТ: выдать доступ агенту на сам хост
+# =====================================================
+detect_host_ssh_port() {
+  local p=""
+  if command -v ss >/dev/null 2>&1; then
+    p=$(ss -tlnp 2>/dev/null | grep -i sshd | grep -oE ':[0-9]+' | head -1 | tr -d ':')
+  fi
+  echo "${p:-22}"
+}
+
+host_agent_mode() {
+  need_root "$@"
+  load_ttl_defaults
+  local NAME="${1:-}"
+  if [ -z "$NAME" ]; then
+    read -rp "Имя агента (логин): " NAME
+  fi
+  shift || true
+  local TTL="${1:-}"
+  shift || true
+  local POLICY="${1:-}"
+  load_ttl_defaults
+  TTL="${TTL:-$DEFAULT_TTL}"
+  POLICY="${POLICY:-$DEFAULT_POLICY}"
+
+  validate_name "$NAME" || { error "Недопустимое имя: строчные a-z, цифры, '-', '_'."; exit 1; }
+  [[ "$TTL" =~ ^[0-9]+$ ]] && [ "$TTL" -ge 1 ] || TTL="$DEFAULT_TTL"
+  case "$POLICY" in lock|locksudo|delete) ;; *) POLICY="$DEFAULT_POLICY" ;; esac
+
+  local SUDO_MODE="nopasswd"
+  read -rp "Sudo: nopasswd / askpass / no [nopasswd]: " sm
+  case "${sm:-}" in nopasswd|askpass|no) SUDO_MODE="${sm}" ;; esac
+
+  local PASS=""
+  read -rp "Пароль (Enter — сгенерировать случайный): " p
+  if [ -n "${p:-}" ]; then PASS="$p"; else PASS=$(gen_password); fi
+
+  agent_add_batch "$NAME" "$PASS" "$TTL" "$POLICY" "$SUDO_MODE"
+
+  local HPORT HOSTIP
+  HPORT=$(detect_host_ssh_port)
+  HOSTIP=$(hostname -I 2>/dev/null | awk '{print $1}')
+  echo ""
+  ok "============================================="
+  ok "Агент '$NAME' создан на ЭТОМ ХОСТЕ!"
+  echo "  Подключение:  ssh $NAME@${HOSTIP:-<IP_хоста>} -p $HPORT"
+  echo "  Пароль:       указан выше"
+  echo "  TTL:          $TTL мин простоя (политика: $POLICY)"
+  echo "  Список:       ovssh list (на хосте)"
+  ok "============================================="
+}
+
+# =====================================================
+# ХОСТ: запустить openvibessh внутри контейнера
+# =====================================================
+run_inside_container() {
+  local CT
+  CT=$(pick_container "${1:-}") || return 1
+  info "Загружаю скрипт в контейнер '$CT'..."
+  if lxc exec "$CT" -- bash -c "command -v curl >/dev/null 2>&1 || { export DEBIAN_FRONTEND=noninteractive; apt-get update -qq 2>/dev/null; apt-get install -y -qq curl 2>/dev/null; }; curl -fsSL $OVSSH_URL -o /tmp/ovssh.sh && echo DOWNLOADED"; then
+    ok "Скрипт загружен: /tmp/ovssh.sh"
+  else
+    error "Не удалось загрузить скрипт в контейнер."
+    return 1
+  fi
+  info "Открываю меню внутри контейнера (для возврата: пункт 0)..."
+  lxc exec "$CT" -- bash /tmp/ovssh.sh
+  ok "Вы вернулись из контейнера."
+}
+
+# =====================================================
+# ХОСТ: вход в shell контейнера
+# =====================================================
+shell_into_container() {
+  local CT
+  CT=$(pick_container "${1:-}") || return 1
+  info "Вход в контейнер '$CT' (root). Для возврата наберите: exit"
+  lxc exec "$CT" -- bash -l
+  ok "Вы вернулись из контейнера."
+}
+
+# =====================================================
+# ХОСТ: диагностика
+# =====================================================
+diag_containers() {
+  echo "=== Контейнеры LXD ==="
+  local nm st ip found=false
+  printf "  %-28s %-10s %s\n" "ИМЯ" "СТАТУС" "IP"
+  while IFS=',' read -r nm st ip; do
+    [ -n "$nm" ] || continue
+    printf "  %-28s %-10s %s\n" "$nm" "$st" "${ip:--}"
+    found=true
+  done < <(lxc list --format csv -c ns4 2>/dev/null)
+  $found || warn "  Контейнеров нет."
+}
+
+diag_ports() {
+  echo "=== Открытые порты openvibessh ==="
+  local found=false ct dev listen connect lres
+  while IFS= read -r ct; do
+    [ -n "$ct" ] || continue
+    while IFS= read -r dev; do
+      [ -n "$dev" ] || continue
+      listen=$(lxc config device get "$ct" "$dev" listen 2>/dev/null | sed 's/tcp:0.0.0.0://')
+      connect=$(lxc config device get "$ct" "$dev" connect 2>/dev/null | sed 's/tcp:127.0.0.1://')
+      if is_port_free "$listen"; then
+        lres="FAIL: не слушается"
+      else
+        lres=" OK : слушается"
+      fi
+      printf "  [%s] %s: %s -> %s\n" "$lres" "$ct" "$listen" "$connect"
+      found=true
+    done < <(lxc config device list "$ct" 2>/dev/null | grep "ovssh-")
+  done < <(lxc list --format csv -c n 2>/dev/null)
+  $found || warn "  Открытых портов нет."
+}
+
+diag_agents() {
+  local CT
+  CT=$(pick_container "") || return 1
+  echo "=== Агенты в контейнере '$CT' ==="
+  lxc exec "$CT" -- bash -c '
+    if ! command -v sshd >/dev/null 2>&1 && [ ! -x /usr/sbin/sshd ]; then
+      echo "  [FAIL] openssh-server не установлен"
+    else
+      st=$(systemctl is-active ssh 2>/dev/null)
+      if [ "$st" = "active" ]; then echo "  [ OK ] sshd активен"; else echo "  [FAIL] sshd не активен ($st)"; fi
+    fi
+    if ss -tln 2>/dev/null | grep -qE "[:.]22\b"; then
+      echo "  [ OK ] порт 22 слушается"
+    else
+      echo "  [FAIL] порт 22 не слушается"
+    fi
+    if [ -f /etc/openvibessh/agents.list ] && [ -s /etc/openvibessh/agents.list ]; then
+      echo "  Агенты:"
+      while IFS="|" read -r name rest; do
+        [ -n "$name" ] || continue
+        state=$(echo "$rest" | grep -oE "state=[A-Z]+" | cut -d= -f2)
+        sudom=$(echo "$rest" | grep -oE "sudo=[a-z]+" | cut -d= -f2)
+        if id -u "$name" >/dev/null 2>&1; then
+          echo "    - $name (sudo=$sudom, состояние=${state:-?})"
+        else
+          echo "    - $name (состояние=${state:-?}, ПОЛЬЗОВАТЕЛЬ ОТСУТСТВУЕТ)"
+        fi
+      done < /etc/openvibessh/agents.list
+    else
+      echo "  [ !!! ] Агентов не выдавалось (/etc/openvibessh/agents.list пуст)"
+    fi
+    if systemctl is-active openvibessh-cron.timer >/dev/null 2>&1; then
+      echo "  [ OK ] TTL-планировщик активен"
+    else
+      echo "  [ !!! ] TTL-планировщик не активен (настроить: ttl 30 lock)"
+    fi
+  '
+}
+
+diag_menu() {
+  while true; do
+    echo ""
+    echo "=========== ДИАГНОСТИКА ==========="
+    echo " 1) Контейнеры (имя, статус, IP)"
+    echo " 2) Порты openvibessh (слушаются ли на хосте)"
+    echo " 3) Агенты в контейнере (sshd, порт 22, TTL)"
     echo " 0) Назад"
     echo "==================================="
     read -rp "Выбор [0-3]: " c || exit 0
@@ -810,6 +1019,7 @@ usage() {
   echo "  $0 agent-add <имя> <пароль|-> <минуты> <политика> <no|askpass|nopasswd>"
   echo "  $0 list | disable <имя> | ssh | ttl <минут> [политика]"
   echo "  $0 install             — прописать скрипт в систему (команда ovssh)"
+  echo "  $0 host-agent [имя] [минут] [политика] - выдать доступ агенту на сам хост"
   echo ""
   echo "Политики TTL: lock (блок всего), locksudo (только sudo), delete (полный отзыв)"
 }
