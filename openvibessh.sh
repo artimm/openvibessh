@@ -18,7 +18,7 @@
 # =====================================================
 set -uo pipefail
 
-VERSION="1.5.2"
+VERSION="1.6"
 CONF_DIR="/etc/openvibessh"
 LIST_FILE="$CONF_DIR/agents.list"
 AGENTS_CONF_DIR="$CONF_DIR/agents"
@@ -251,6 +251,27 @@ cron_mode() {
     fi
   done < "$LIST_FILE"
 }
+pick_policy() {
+  # Возвращает политику: $1 - значение по умолчанию (1 = lock)
+  local def="${1:-1}"
+  echo "Политики автоотключения (что делать с агентом при простое):" >&2
+  echo "  1) lock     - блокировать всё: пароль + sudo, обрыв сессий" >&2
+  echo "              (аккаунт остается; agent <имя> вернет доступ с новым паролем)" >&2
+  echo "  2) locksudo - забрать только sudo, SSH-вход остается" >&2
+  echo "  3) delete   - удалить пользователя полностью," >&2
+  echo "              домашняя папка с проектами архивируется в /home/opencode/archive" >&2
+  echo "" >&2
+  read -rp "Политика [1-$def]: " pn
+  local n="${pn:-$def}"
+  case "$n" in
+    1) echo "lock" ;;
+    2) echo "locksudo" ;;
+    3) echo "delete" ;;
+    *) error "Неверный пункт - использую lock"
+       echo "lock" ;;
+  esac
+}
+
 
 ttl_mode() {
   need_root "$@"
@@ -259,7 +280,7 @@ ttl_mode() {
     error "Укажите минуты: $0 ttl 30 lock"
     exit 1
   fi
-  pol="${pol:-lock}"
+  if [ -z "$pol" ]; then pol=$(pick_policy 1); fi
   case "$pol" in lock|locksudo|delete) ;; *) error "Политика: lock | locksudo | delete"; exit 1 ;; esac
   mkdir -p "$CONF_DIR"
   echo "DEFAULT_TTL=$ttl" > "$TTL_CONF"
@@ -499,8 +520,7 @@ open_access() {
     if [ -n "${p:-}" ]; then PASS="$p"; else PASS=$(gen_password); fi
     read -rp "Минут простоя до автоотключения [30]: " TTL
     TTL="${TTL:-30}"
-    read -rp "Политика (lock / locksudo / delete) [lock]: " POLICY
-    POLICY="${POLICY:-lock}"
+    POLICY=$(pick_policy 1)
     read -rp "Sudo: nopasswd / askpass / no [nopasswd]: " SUDO_MODE
     SUDO_MODE="${SUDO_MODE:-nopasswd}"
 
@@ -621,8 +641,7 @@ menu_container() {
       1) agent_mode "" ;;
       2) list_mode ;;
       3) read -rp "Минут простоя до отключения [30]: " m
-       read -rp "Политика (lock / locksudo / delete) [lock]: " p
-       ttl_mode "${m:-30}" "${p:-lock}" ;;
+       ttl_mode "${m:-30}" "" ;;
       4) ensure_sshd ;;
       5) read -rp "Имя агента: " n
        [ -n "$n" ] && disable_now "$n" ;;
