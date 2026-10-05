@@ -18,7 +18,7 @@
 # =====================================================
 set -uo pipefail
 
-VERSION="1.5"
+VERSION="1.5.1"
 CONF_DIR="/etc/openvibessh"
 LIST_FILE="$CONF_DIR/agents.list"
 AGENTS_CONF_DIR="$CONF_DIR/agents"
@@ -75,6 +75,10 @@ if [ ! -t 0 ] && [ "${OVSSH_EXECED:-}" != "1" ]; then
   fi
   chmod +x "$OVSSH_TMP" 2>/dev/null
   export OVSSH_EXECED=1
+  # stdin - труба от curl; переключаем на терминал, чтобы меню и вопросы работали
+  if [ -e /dev/tty ]; then
+    exec bash "$OVSSH_TMP" "$@" < /dev/tty
+  fi
   exec bash "$OVSSH_TMP" "$@"
 fi
 
@@ -567,7 +571,7 @@ host_menu() {
     echo " 3) Закрыть доступ (удалить порт)"
     echo " 0) Выход"
     echo "====================================================="
-    read -rp "Выбор [0-3]: " c
+    read -rp "Выбор [0-3]: " c || exit 0
     case "${c:-}" in
       1) open_access ;;
       2) list_host_ports ;;
@@ -595,7 +599,7 @@ menu_container() {
     echo " 6) Установить скрипт в систему (команда ovssh)"
     echo " 0) Выход"
     echo "====================================================="
-    read -rp "Выбор [0-6]: " c
+    read -rp "Выбор [0-6]: " c || exit 0
     case "${c:-}" in
       1) agent_mode "" ;;
       2) list_mode ;;
