@@ -20,7 +20,7 @@
 # =====================================================
 set -uo pipefail
 
-VERSION="1.3.1"
+VERSION="1.4"
 CONF_DIR="/etc/openvibessh"
 LIST_FILE="$CONF_DIR/agents.list"
 AGENTS_CONF_DIR="$CONF_DIR/agents"
@@ -245,6 +245,22 @@ ttl_mode() {
   echo "DEFAULT_POLICY=$pol" >> "$TTL_CONF"
   ok "По умолчанию: автоотключение через $ttl мин простоя, политика: $pol"
   install_timer
+}
+
+# =====================================================
+# УСТАНОВКА СКРИПТА В СИСТЕМУ
+# =====================================================
+install_mode() {
+  need_root "$@"
+  self_install
+  ln -sf "$SELF" /usr/local/bin/ovssh
+  ok "============================================="
+  ok "openvibessh установлен в систему!"
+  echo "  Команды:  ovssh          (меню/автоопределение)"
+  echo "            ovssh host     (на LXD-хосте)"
+  echo "            ovssh agent <имя> [минут] [политика]"
+  echo "            ovssh list | ssh | disable <имя> | ttl <минут>"
+  ok "============================================="
 }
 
 # =====================================================
@@ -478,6 +494,7 @@ usage() {
   echo "  $0 list                           — доступы + остаток времени"
   echo "  $0 disable <имя>                  — отключить агента немедленно"
   echo "  $0 ssh                            — установить/включить/перезапустить ssh"
+  echo "  $0 install                    - install script to system (command: ovssh)"
   echo "  $0 cron                           — внутренний (вызывается таймером systemd)"
   echo ""
   echo "Политики: lock (блок всего), locksudo (только sudo), delete (полный отзыв)"
@@ -511,6 +528,7 @@ main() {
     list)    list_mode ;;
     disable) shift; disable_now "$@" ;;
     ssh)     ensure_sshd ;;
+    install) install_mode ;;
     cron)    cron_mode ;;
     -h|--help|help) usage ;;
     "")
