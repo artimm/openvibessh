@@ -14,7 +14,7 @@
 # =====================================================
 set -uo pipefail
 
-VERSION="1.0"
+VERSION="1.1"
 LIST_FILE="/etc/openvibessh/agents.list"
 
 info()  { echo -e "\033[0;34m[INFO]\033[0m $1"; }
@@ -103,6 +103,61 @@ host_mode() {
 }
 
 # =====================================================
+# SSH: установить / включить / запустить (в контейнере)
+# =====================================================
+ensure_sshd() {
+  need_root "$@"
+  echo "=== SSH: проверка установки и запуска ==="
+
+  if ! command -v sshd >/dev/null 2>&1 && [ ! -x /usr/sbin/sshd ]; then
+    info "openssh-server не установлен — устанавливаю..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq 2>/dev/null
+    if apt-get install -y -qq openssh-server 2>/dev/null; then
+      ok "openssh-server установлен."
+    else
+      error "Не удалось установить openssh-server."
+      return 1
+    fi
+  else
+    ok "openssh-server уже установлен."
+  fi
+
+  mkdir -p /etc/ssh/sshd_config.d
+  printf 'PasswordAuthentication yes\nPort 22\n' > /etc/ssh/sshd_config.d/60-openvibessh.conf
+
+  if systemctl list-unit-files ssh.socket >/dev/null 2>&1 && systemctl is-enabled ssh.socket >/dev/null 2>&1; then
+    info "Обнаружен ssh.socket (socket-activation) — отключаю, чтобы работал порт из конфига..."
+    systemctl stop ssh.socket 2>/dev/null
+    systemctl disable ssh.socket 2>/dev/null
+  fi
+
+  if systemctl is-enabled ssh >/dev/null 2>&1; then
+    ok "Служба ssh в автозапуске."
+  else
+    info "Служба ssh выключена (disabled) — включаю..."
+    systemctl enable ssh 2>/dev/null && ok "Служба ssh включена (автозапуск)."
+  fi
+
+  local st
+  st=$(systemctl is-active ssh 2>/dev/null)
+  if [ "$st" = "active" ]; then
+    info "Служба ssh запущена — перезапускаю для применения конфига..."
+    systemctl restart ssh && ok "ssh перезапущен."
+  else
+    info "Служба ssh не запущена (состояние: ${st:-unknown}) — запускаю..."
+    systemctl start ssh && ok "ssh запущен."
+  fi
+
+  sleep 1
+  if ss -tln 2>/dev/null | grep -qE '[:.]22\b'; then
+    ok "Порт 22 слушается."
+  else
+    warn "Порт 22 не слушается — смотрите: journalctl -u ssh -n 20"
+  fi
+}
+
+# =====================================================
 # РЕЖИМ КОНТЕЙНЕРА: выдача доступа агенту
 # =====================================================
 agent_mode() {
@@ -143,20 +198,8 @@ agent_mode() {
     rm -f /etc/sudoers.d/91-ovssh-"$NAME" 2>/dev/null
   fi
 
-  if ! command -v sshd >/dev/null 2>&1; then
-    info "Установка openssh-server..."
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq 2>/dev/null
-    apt-get install -y -qq openssh-server 2>/dev/null
-  fi
-  mkdir -p /etc/ssh/sshd_config.d
-  printf 'PasswordAuthentication yes\nPort 22\n' > /etc/ssh/sshd_config.d/60-openvibessh.conf
-  if systemctl is-active ssh.socket >/dev/null 2>&1; then
-    systemctl stop ssh.socket
-    systemctl disable ssh.socket 2>/dev/null
-  fi
-  systemctl enable ssh >/dev/null 2>&1
-  systemctl restart ssh
+  # SSH: ставим если нет, включаем если выключен, запускаем/перезапускаем
+  ensure_sshd
 
   mkdir -p /etc/openvibessh
   touch "$LIST_FILE"
@@ -211,12 +254,14 @@ usage() {
   echo "  $0 host [контейнер] [порт]   — на хосте: контейнеры + проброс порта -> 22"
   echo "  $0 agent <имя>               — в контейнере: доступ (логин+пароль+sudo)"
   echo "  $0 list                      — в контейнере: список выданных прав"
+  echo "  $0 ssh                       — в контейнере: установить/включить/перезапустить ssh"
 }
 
 main() {
   case "${1:-}" in
     host)  shift; host_mode "$@" ;;
     agent) shift; agent_mode "$@" ;;
+    ssh)   ensure_sshd ;;
     list)  list_mode ;;
     -h|--help|help) usage ;;
     "")
