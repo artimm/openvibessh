@@ -20,7 +20,7 @@
 # =====================================================
 set -uo pipefail
 
-VERSION="1.2"
+VERSION="1.3"
 CONF_DIR="/etc/openvibessh"
 LIST_FILE="$CONF_DIR/agents.list"
 AGENTS_CONF_DIR="$CONF_DIR/agents"
@@ -447,6 +447,29 @@ disable_now() {
 }
 
 # =====================================================
+menu_container() {
+  echo "OPENVIBESSH v$VERSION — режим контейнера"
+  echo " 1) Выдать доступ агенту (логин + пароль + sudo + TTL)"
+  echo " 2) Список доступов и остаток времени"
+  echo " 3) Настроить TTL автоотключения"
+  echo " 4) Починить SSH (установить / включить / перезапустить)"
+  echo " 5) Отключить агента немедленно"
+  echo " 0) Выход"
+  read -rp "Выбор [0-5]: " c
+  case "${c:-}" in
+    1) agent_mode "" ;;
+    2) list_mode ;;
+    3) read -rp "Минут простоя до отключения [30]: " m
+       read -rp "Политика (lock / locksudo / delete) [lock]: " p
+       ttl_mode "${m:-30}" "${p:-lock}" ;;
+    4) ensure_sshd ;;
+    5) read -rp "Имя агента: " n
+       [ -n "$n" ] && disable_now "$n" ;;
+    0) exit 0 ;;
+    *) warn "Неизвестный пункт." ;;
+  esac
+}
+
 usage() {
   echo "OPENVIBESSH v$VERSION — выдача SSH-доступа агентам в LXD (+TTL планировщик)"
   echo "  $0 host [контейнер] [порт]        — на хосте: контейнеры + проброс порта -> 22"
@@ -459,6 +482,18 @@ usage() {
   echo ""
   echo "Политики: lock (блок всего), locksudo (только sudo), delete (полный отзыв)"
 }
+
+# =====================================================
+# Самоперезапуск из файла, если скрипт передан через pipe (curl ... | bash):
+# иначе интерактивные вопросы (read) ловили бы сам скрипт из stdin
+# =====================================================
+if [ ! -t 0 ] && [ "${OVSSH_EXECED:-}" != "1" ]; then
+  OVSSH_TMP="$(mktemp /tmp/ovssh.XXXXXX.sh 2>/dev/null || echo /tmp/ovssh.sh)"
+  cat > "$OVSSH_TMP"
+  chmod +x "$OVSSH_TMP"
+  export OVSSH_EXECED=1
+  exec bash "$OVSSH_TMP" "$@"
+fi
 
 main() {
   case "${1:-}" in
@@ -474,7 +509,7 @@ main() {
       if command -v lxc >/dev/null 2>&1; then
         host_mode
       else
-        usage
+        menu_container
       fi ;;
     *) usage; exit 1 ;;
   esac
