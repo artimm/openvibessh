@@ -10,7 +10,7 @@
 set -uo pipefail
 export PATH="/snap/bin:$PATH"   # snap-LXD: lxc живет здесь
 
-VERSION="1.9.1"
+VERSION="1.9.2"
 CONF_DIR="/etc/openvibessh"
 LIST_FILE="$CONF_DIR/agents.list"
 AGENTS_CONF_DIR="$CONF_DIR/agents"
@@ -100,7 +100,7 @@ ensure_sshd() {
   fi
 
   mkdir -p /etc/ssh/sshd_config.d
-  printf 'PasswordAuthentication yes\nPort 22\n' > /etc/ssh/sshd_config.d/60-openvibessh.conf
+  printf 'PasswordAuthentication yes\nPort 22\n' > /etc/ssh/sshd_config.d/00-openvibessh.conf
 
   if systemctl list-unit-files ssh.socket >/dev/null 2>&1 && systemctl is-enabled ssh.socket >/dev/null 2>&1; then
     info "Обнаружен ssh.socket (socket-activation) — отключаю..."
@@ -491,7 +491,7 @@ open_access() {
   info "Контейнер: $CT | внешний порт: $PORT -> внутренний 22"
 
   info "Готовим SSH внутри контейнера..."
-  if lxc exec "$CT" -- bash -c "command -v sshd >/dev/null 2>&1 || { export DEBIAN_FRONTEND=noninteractive; apt-get update -qq 2>/dev/null; apt-get install -y -qq openssh-server 2>/dev/null; }; mkdir -p /etc/ssh/sshd_config.d; printf 'PasswordAuthentication yes\nPort 22\n' > /etc/ssh/sshd_config.d/60-openvibessh.conf; if systemctl list-unit-files ssh.socket >/dev/null 2>&1 && systemctl is-enabled ssh.socket >/dev/null 2>&1; then systemctl stop ssh.socket; systemctl disable ssh.socket 2>/dev/null; fi; systemctl enable ssh >/dev/null 2>&1; systemctl restart ssh"; then
+  if lxc exec "$CT" -- bash -c "command -v sshd >/dev/null 2>&1 || { export DEBIAN_FRONTEND=noninteractive; apt-get update -qq 2>/dev/null; apt-get install -y -qq openssh-server 2>/dev/null; }; mkdir -p /etc/ssh/sshd_config.d; printf 'PasswordAuthentication yes\nPort 22\n' > /etc/ssh/sshd_config.d/00-openvibessh.conf; if systemctl list-unit-files ssh.socket >/dev/null 2>&1 && systemctl is-enabled ssh.socket >/dev/null 2>&1; then systemctl stop ssh.socket; systemctl disable ssh.socket 2>/dev/null; fi; systemctl enable ssh >/dev/null 2>&1; systemctl restart ssh"; then
     ok "SSH в контейнере готов (порт 22, пароли разрешены)."
   else
     warn "Не удалось подготовить SSH автоматически."
