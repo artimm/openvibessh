@@ -10,7 +10,7 @@
 set -uo pipefail
 export PATH="/snap/bin:$PATH"   # snap-LXD: lxc живет здесь
 
-VERSION="1.9.2"
+VERSION="1.10"
 CONF_DIR="/etc/openvibessh"
 LIST_FILE="$CONF_DIR/agents.list"
 AGENTS_CONF_DIR="$CONF_DIR/agents"
@@ -163,6 +163,14 @@ WantedBy=timers.target
 EOF
   systemctl daemon-reload
   systemctl enable --now openvibessh-cron.timer 2>/dev/null
+  if ! systemctl is-active openvibessh-cron.timer >/dev/null 2>&1; then
+    echo */2 * * * * root /usr/local/bin/openvibessh.sh cron > /etc/cron.d/openvibessh
+    chmod 644 /etc/cron.d/openvibessh
+    warn 
+"
+systemd timer unavailable - cron.d fallback installed
+"
+  fi
   ok "Планировщик активен: проверка простоя каждые 2 минуты."
 }
 
@@ -208,16 +216,16 @@ apply_policy() {
 cron_mode() {
   need_root "$@"
   load_ttl_defaults
-  [ -f "$LIST_FILE" ] || exit 0
+  [ -f "$LIST_FILE" ] || return 0
   local now
   now=$(date +%s)
-  local name sudo_mode ttl pol state created last idle out
-  while IFS='|' read -r name f2 f3 f4 f5 f6; do
+  local to_disable="" name sudo_mode ttl pol state created last idle
+  while IFS="|" read -r name f2 f3 f4 f5 f6; do
     [ -n "$name" ] || continue
-    sudo_mode=$(echo "$f2" | sed 's/sudo=//')
-    ttl=$(echo "$f4" | sed 's/ttl=//')
-    pol=$(echo "$f5" | sed 's/policy=//')
-    state=$(echo "$f6" | sed 's/state=//')
+    sudo_mode=$(echo "$f2" | sed "s/sudo=//")
+    ttl=$(echo "$f4" | sed "s/ttl=//")
+    pol=$(echo "$f5" | sed "s/policy=//")
+    state=$(echo "$f6" | sed "s/state=//")
     ttl="${ttl:-$DEFAULT_TTL}"
     pol="${pol:-$DEFAULT_POLICY}"
     [ "$state" = "ACTIVE" ] || continue
@@ -226,20 +234,35 @@ cron_mode() {
     last=$(get_last_activity_epoch "$name" "$created")
     idle=$(( (now - last) / 60 ))
     if [ "$idle" -ge "$ttl" ]; then
-      apply_policy "$name" "$pol" "$sudo_mode"
-      out=""
-      while IFS= read -r line; do
-        if [[ "$line" == "$name|"* ]]; then
-          out+="${line%state=*}state=DISABLED"$'\n'
-        else
-          out+="$line"$'\n'
-        fi
-      done < "$LIST_FILE"
-      printf '%s' "$out" > "$LIST_FILE"
-      echo "$(date '+%Y-%m-%d %H:%M:%S') agent=$name policy=$pol idle=${idle}m ttl=${ttl}m -> DISABLED" >> "$LOG_FILE"
-      warn "Агент '$name' отключен (простой ${idle}м >= ${ttl}м, политика: $pol)."
+      to_disable+="$name|$pol|$sudo_mode "
+      echo "$(date +%Y-%m-%d %H:%M:%S) agent=$name policy=$pol idle=${idle}m ttl=${ttl}m -> QUEUED" >> "$LOG_FILE"
     fi
   done < "$LIST_FILE"
+
+  [ -n "$to_disable" ] || return 0
+
+  # Блокируем ПОСЛЕ чтения списка: перезапись файла внутри цикла ломала обработку остальных агентов
+  local item n rest pol sudo_mode
+  for item in $to_disable; do
+    n="${item%%|*}"
+    rest="${item#*|}"
+    pol="${rest%%|*}"
+    sudo_mode="${rest##*|}"
+    apply_policy "$n" "$pol" "$sudo_mode"
+  done
+
+  # Обновляем статусы в реестре одной перезаписью (список уже прочитан)
+  local out="" nm f2 f3 f4 f5 f6
+  while IFS="|" read -r nm f2 f3 f4 f5 f6; do
+    [ -n "$nm" ] || continue
+    if [[ "$to_disable" == *"$nm|"* ]]; then
+      out+="${nm}|${f2}|${f3}|${f4}|${f5}|state=DISABLED"
+    else
+      out+="$nm|$f2|$f3|$f4|$f5|$f6"
+    fi
+  done < "$LIST_FILE"
+  printf "%s\n" "$out" > "$LIST_FILE"
+  warn "TTL: отключены агенты: $(echo "$to_disable" | tr "|" "/" | tr " " ",")"
 }
 
 ttl_mode() {
@@ -923,6 +946,20 @@ usage() {
 }
 
 main() {
+  # TTL: enforce on every run (safety if timer is down)
+  if [ -f 
+"
+$
+LIST_FILE
+"
+ ]; then
+    bash 
+"
+$
+0
+"
+ cron >/dev/null 2>&1 || true
+  fi
   case "${1:-}" in
     host)       host_menu ;;
     open)       shift; open_access "$@" ;;
